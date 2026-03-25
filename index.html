@@ -1078,6 +1078,63 @@ body.gallery-mode .mesh-bg      { display: block; }
 </div>
 
 <script>
+
+const SUPABASE_URL    = 'https://xevoioozsdjjlzbzyxqt.supabase.co';  
+const SUPABASE_ANON   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhldm9pb296c2Rqamx6Ynp5eHF0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MDMwMDEsImV4cCI6MjA4OTk3OTAwMX0.t-mnBF2Q8cE99RQvti5namCw1ZdRQwHAjD-TGx1CcR0';               // ← replace
+const BUCKET          = 'birthday-wishes';                    
+const TABLE           = 'wishes';  
+
+/* ── Supabase REST helpers ── */
+const sbHeaders = {
+  'apikey': SUPABASE_ANON,
+  'Authorization': `Bearer ${SUPABASE_ANON}`,
+  'Content-Type': 'application/json'
+};
+
+async function sbUploadImage(path, blob, upsert = false) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_ANON,
+      'Authorization': `Bearer ${SUPABASE_ANON}`,
+      'Content-Type': blob.type,
+      'x-upsert': upsert ? 'true' : 'false'
+    },
+    body: blob
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`;
+}
+
+async function sbInsertWish(row) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Prefer': 'return=representation' },
+    body: JSON.stringify(row)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function sbLoadWishes(session_id) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/${TABLE}?session_id=eq.${encodeURIComponent(session_id)}&order=created_at.asc`,
+    { headers: sbHeaders }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function sbDeleteWish(id) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?id=eq.${id}`, {
+    method: 'DELETE',
+    headers: sbHeaders
+  });
+  if (!res.ok) throw new Error(await res.text());
+  // Note: image file stays in storage — only the DB record is removed
+}
+
+/* ── PIN ── */
 const _a = '777', _b = '8', _c = '777';
 const _k = _a + _b + _c;
 
@@ -1201,15 +1258,25 @@ function showHeroPhoto(src) {
 function handleHeroPhoto(input) {
   if (!isOwner) { showToast('🔒 Owner mode required'); return; }
   if (!input.files[0]) return;
-  compressImage(input.files[0], dataUrl => {
-    showHeroPhoto(dataUrl);
-    try { localStorage.setItem('sanju_hero_photo', dataUrl); } catch(_) {}
+  compressToBlob(input.files[0], async (blob, previewUrl) => {
+    showHeroPhoto(previewUrl); // instant local preview
+    showToast('⏳ Uploading profile photo…');
+    try {
+      const path = `profile/sanju_hero.jpg`;
+      const publicUrl = await sbUploadImage(path, blob, true);
+      showHeroPhoto(publicUrl);
+      try { localStorage.setItem('sanju_hero_url', publicUrl); } catch(_) {}
+      showToast('✅ Profile photo saved!');
+    } catch(err) {
+      console.error(err);
+      showToast('❌ Upload failed — check Supabase config');
+    }
   });
 }
-// Restore saved hero photo — everyone sees it on load
+// Restore saved hero photo URL — everyone sees it on load
 (function(){
   try {
-    const saved = localStorage.getItem('sanju_hero_photo');
+    const saved = localStorage.getItem('sanju_hero_url');
     if (saved) showHeroPhoto(saved);
   } catch(_) {}
 })();
@@ -1238,16 +1305,16 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s; re
 
 /* ── STATE ── */
 let wishes = [];
-let friendPhoto = null, gFriendPhoto = null;
+let friendPhoto = null, gFriendPhoto = null;   // { blob, previewUrl }
+let currentSessionId = null;
 
-/* ── IMAGE COMPRESSION ── */
-// Resizes to max 600px on longest side, JPEG quality 0.45 → ~20–50 KB per photo
-function compressImage(file, callback) {
+/* ── IMAGE COMPRESSION → Blob ── */
+function compressToBlob(file, callback) {
   const reader = new FileReader();
   reader.onload = e => {
     const img = new Image();
     img.onload = () => {
-      const MAX = 600;
+      const MAX = 900;
       let w = img.width, h = img.height;
       if (w > MAX || h > MAX) {
         if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
@@ -1256,77 +1323,110 @@ function compressImage(file, callback) {
       const canvas = document.createElement('canvas');
       canvas.width = w; canvas.height = h;
       canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      callback(canvas.toDataURL('image/jpeg', 0.45));
+      canvas.toBlob(blob => callback(blob, URL.createObjectURL(blob)), 'image/jpeg', 0.72);
     };
     img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 }
 
-/* ── OWNER UPLOAD ── */
+/* ── OWNER UPLOAD (screenshots) ── */
 function handleOwnerFiles(files) {
+  if (!isOwner) { showToast('🔒 Owner mode required'); return; }
   Array.from(files).forEach(f => {
-    compressImage(f, dataUrl => {
-      wishes.push({ id: uid(), dataUrl, name: 'Birthday Screenshot', msg: '', ts: Date.now(), isOwner: true });
-      renderGallery();
+    compressToBlob(f, async (blob, previewUrl) => {
+      if (!currentSessionId) currentSessionId = 'session_' + Date.now().toString(36);
+      const path = `${currentSessionId}/${uid()}.jpg`;
+      showToast('⏳ Uploading…');
+      try {
+        const imageUrl = await sbUploadImage(path, blob);
+        const row = { session_id: currentSessionId, name: 'Birthday Screenshot', msg: '', image_url: imageUrl, storage_path: path, is_owner: true };
+        await sbInsertWish(row);
+        wishes.push({ id: row.id || uid(), dataUrl: imageUrl, storage_path: path, name: row.name, msg: row.msg, ts: Date.now(), isOwner: true });
+        renderGallery();
+        showToast('✅ Uploaded!');
+      } catch(err) {
+        console.error(err);
+        showToast('❌ Upload failed — check Supabase config');
+      }
     });
   });
 }
 
-/* ── FRIEND PHOTO ── */
+/* ── FRIEND PHOTO PREVIEW ── */
 function handleFriendPhoto(input) {
   if (!input.files[0]) return;
-  compressImage(input.files[0], dataUrl => {
-    friendPhoto = dataUrl;
-    document.getElementById('pp-img').src = friendPhoto;
+  compressToBlob(input.files[0], (blob, previewUrl) => {
+    friendPhoto = { blob, previewUrl };
+    document.getElementById('pp-img').src = previewUrl;
     document.getElementById('pp-preview').style.display = 'block';
   });
 }
 function handleGFriendPhoto(input) {
   if (!input.files[0]) return;
-  compressImage(input.files[0], dataUrl => {
-    gFriendPhoto = dataUrl;
-    document.getElementById('g-pp-img').src = gFriendPhoto;
+  compressToBlob(input.files[0], (blob, previewUrl) => {
+    gFriendPhoto = { blob, previewUrl };
+    document.getElementById('g-pp-img').src = previewUrl;
     document.getElementById('g-pp-preview').style.display = 'block';
   });
 }
 
-/* ── SUBMIT WISH (owner page) ── */
-function submitWish() {
+/* ── SUBMIT WISH (owner/main page) ── */
+async function submitWish() {
   const name = document.getElementById('friend-name').value.trim();
   const msg  = document.getElementById('friend-msg').value.trim();
-  if (!name) { showToast('⚠️ Please enter your name'); return; }
+  if (!name)        { showToast('⚠️ Please enter your name'); return; }
   if (!friendPhoto) { showToast('⚠️ Please choose a photo'); return; }
-  wishes.push({ id: uid(), dataUrl: friendPhoto, name, msg, ts: Date.now(), isOwner: false });
-  renderGallery();
-  document.getElementById('friend-name').value = '';
-  document.getElementById('friend-msg').value = '';
-  document.getElementById('friend-photo-input').value = '';
-  document.getElementById('pp-preview').style.display = 'none';
-  friendPhoto = null;
-  showToast('🎉 Wish added!');
-  setTimeout(() => document.getElementById('gallery').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  if (!currentSessionId) currentSessionId = 'session_' + Date.now().toString(36);
+  const path = `${currentSessionId}/${uid()}.jpg`;
+  showToast('⏳ Uploading wish…');
+  try {
+    const imageUrl = await sbUploadImage(path, friendPhoto.blob);
+    const row = { session_id: currentSessionId, name, msg, image_url: imageUrl, storage_path: path, is_owner: false };
+    await sbInsertWish(row);
+    wishes.push({ id: row.id || uid(), dataUrl: imageUrl, storage_path: path, name, msg, ts: Date.now(), isOwner: false });
+    renderGallery();
+    document.getElementById('friend-name').value = '';
+    document.getElementById('friend-msg').value = '';
+    document.getElementById('friend-photo-input').value = '';
+    document.getElementById('pp-preview').style.display = 'none';
+    friendPhoto = null;
+    showToast('🎉 Wish added!');
+    setTimeout(() => document.getElementById('gallery').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  } catch(err) {
+    console.error(err);
+    showToast('❌ Upload failed — check Supabase config');
+  }
 }
 
-/* ── SUBMIT WISH (gallery page) ── */
-function submitGWish() {
+/* ── SUBMIT WISH (gallery/QR page) ── */
+async function submitGWish() {
   const name = document.getElementById('g-friend-name').value.trim();
   const msg  = document.getElementById('g-friend-msg').value.trim();
-  if (!name) { showToast('⚠️ Please enter your name'); return; }
+  if (!name)         { showToast('⚠️ Please enter your name'); return; }
   if (!gFriendPhoto) { showToast('⚠️ Please choose a photo'); return; }
-  const key = new URLSearchParams(window.location.search).get('gallery');
-  let stored = [];
-  try { stored = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_) {}
-  stored.push({ id: uid(), dataUrl: gFriendPhoto, name, msg, ts: Date.now(), isOwner: false });
-  try { localStorage.setItem(key, JSON.stringify(stored)); } catch (_) { showToast('⚠️ Storage full'); return; }
-  renderGalleryView(stored);
-  document.getElementById('g-friend-name').value = '';
-  document.getElementById('g-friend-msg').value = '';
-  document.getElementById('g-friend-photo-input').value = '';
-  document.getElementById('g-pp-preview').style.display = 'none';
-  gFriendPhoto = null;
-  showToast('🎉 Your wish has been added!');
-  setTimeout(() => document.getElementById('gallery-view').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  const sessionId = new URLSearchParams(window.location.search).get('gallery');
+  if (!sessionId) { showToast('❌ No gallery session found'); return; }
+  const path = `${sessionId}/${uid()}.jpg`;
+  showToast('⏳ Uploading wish…');
+  try {
+    const imageUrl = await sbUploadImage(path, gFriendPhoto.blob);
+    const row = { session_id: sessionId, name, msg, image_url: imageUrl, storage_path: path, is_owner: false };
+    await sbInsertWish(row);
+    // Reload all wishes for this session
+    const all = await sbLoadWishes(sessionId);
+    renderGalleryView(all.map(r => ({ id: r.id, dataUrl: r.image_url, name: r.name, msg: r.msg, ts: new Date(r.created_at).getTime(), isOwner: r.is_owner })));
+    document.getElementById('g-friend-name').value = '';
+    document.getElementById('g-friend-msg').value = '';
+    document.getElementById('g-friend-photo-input').value = '';
+    document.getElementById('g-pp-preview').style.display = 'none';
+    gFriendPhoto = null;
+    showToast('🎉 Your wish has been added!');
+    setTimeout(() => document.getElementById('gallery-view').scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  } catch(err) {
+    console.error(err);
+    showToast('❌ Upload failed — check Supabase config');
+  }
 }
 
 /* ── CARD HTML ── */
@@ -1336,7 +1436,6 @@ function wishCardHTML(w, i, canDelete) {
   const dateStr = new Date(w.ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
   const av      = w.isOwner ? '🎂' : initials(name);
   const avStyle = w.isOwner ? 'background:linear-gradient(135deg,#ff6fd8,#ffda6a)' : `background:${grad(i)}`;
-  // Delete button only shown to owner
   const del     = canDelete && isOwner ? `<button class="del-btn" onclick="event.stopPropagation();deleteWish('${w.id}')" title="Remove">🗑️</button>` : '';
   const msgHtml = msg ? `<div class="wish-msg">${esc(msg)}</div>` : '';
   const safeUrl = w.dataUrl.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -1361,11 +1460,18 @@ function wishCardHTML(w, i, canDelete) {
   </div>`;
 }
 
-function deleteWish(id) {
+async function deleteWish(id) {
   if (!isOwner) { showToast('🔒 Owner mode required to delete'); return; }
-  wishes = wishes.filter(w => w.id !== id);
-  renderGallery();
-  showToast('🗑️ Removed');
+  showToast('⏳ Deleting…');
+  try {
+    await sbDeleteWish(id);
+    wishes = wishes.filter(w => w.id !== id);
+    renderGallery();
+    showToast('🗑️ Removed');
+  } catch(err) {
+    console.error(err);
+    showToast('❌ Delete failed');
+  }
 }
 
 /* ── RENDER ── */
@@ -1401,29 +1507,14 @@ function openModalSrc(src) {
 function closeModal(e) {
   if (e.target.id === 'modal') document.getElementById('modal').classList.remove('open');
 }
-// Close modal on Escape
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') document.getElementById('modal').classList.remove('open');
 });
 
-/* ── QR ── */
+/* ── QR — just share the session URL, no localStorage needed ── */
 function generateQR() {
-  if (!wishes.length) { showToast('⚠️ Add some wishes first!'); return; }
-
-  // Clear any previously saved bday_ keys to free up space
-  try {
-    Object.keys(localStorage)
-      .filter(k => k.startsWith('bday_'))
-      .forEach(k => localStorage.removeItem(k));
-  } catch(_) {}
-
-  const key = 'bday_' + Date.now();
-  try { localStorage.setItem(key, JSON.stringify(wishes)); }
-  catch (_) {
-    showToast('⚠️ Still too large — try removing some photos first');
-    return;
-  }
-  const url = window.location.href.split('?')[0] + '?gallery=' + key;
+  if (!currentSessionId) { showToast('⚠️ Add some wishes first!'); return; }
+  const url = window.location.href.split('?')[0] + '?gallery=' + currentSessionId;
   const pill = document.getElementById('url-pill');
   pill.style.display = 'flex';
   document.getElementById('share-url-text').textContent = url;
@@ -1445,15 +1536,31 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-/* ── GALLERY MODE (QR scan) ── */
-(function(){
+/* ── GALLERY MODE (QR scan) — loads from Supabase ── */
+(async function(){
   const key = new URLSearchParams(window.location.search).get('gallery');
   if (!key) return;
   document.body.classList.add('gallery-mode');
+  renderGalleryView([]); // show loading state
+  document.getElementById('gallery-view').innerHTML =
+    '<div class="empty-state"><span class="es-icon">⏳</span><p>Loading wishes…</p></div>';
   try {
-    const stored = localStorage.getItem(key);
-    renderGalleryView(stored ? JSON.parse(stored) : []);
-  } catch (_) { renderGalleryView([]); }
+    const rows = await sbLoadWishes(key);
+    const mapped = rows.map(r => ({
+      id: r.id,
+      dataUrl: r.image_url,
+      storage_path: r.storage_path,
+      name: r.name,
+      msg: r.msg,
+      ts: new Date(r.created_at).getTime(),
+      isOwner: r.is_owner
+    }));
+    renderGalleryView(mapped);
+  } catch(err) {
+    console.error(err);
+    document.getElementById('gallery-view').innerHTML =
+      '<div class="empty-state"><span class="es-icon">❌</span><p>Could not load wishes — check Supabase config</p></div>';
+  }
 })();
 </script>
 </body>
