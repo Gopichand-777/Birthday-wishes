@@ -477,6 +477,10 @@ section { padding: 80px 0; }
 /* ── UPLOAD ZONE ── */
 .upload-section { background: rgba(255,255,255,0.01); }
 
+/* Owner-only elements hidden by default */
+.owner-only { display: none !important; }
+body.owner-mode .owner-only { display: revert !important; }
+
 .upload-zone {
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
@@ -881,9 +885,14 @@ body.gallery-mode .mesh-bg      { display: block; }
         <div class="hero-photo-wrap">
           <div class="hero-photo-ring">
             <div class="hero-photo-inner" id="hero-photo-inner">
-              <div class="hero-photo-placeholder" id="hero-placeholder" onclick="tryOpenHeroPhoto()">
+              <div class="hero-photo-placeholder owner-only" id="hero-placeholder" onclick="tryOpenHeroPhoto()">
                 <span class="ph-icon">📸</span>
                 <span class="ph-txt">Owner: Add Your Photo</span>
+              </div>
+              <!-- Non-owner placeholder (no click, no hint) -->
+              <div class="hero-photo-placeholder" id="hero-placeholder-public" style="cursor:default;">
+                <span class="ph-icon">🎂</span>
+                <span class="ph-txt">Sanju</span>
               </div>
               <img id="hero-img" src="" alt="Sanju" style="display:none;">
             </div>
@@ -895,14 +904,14 @@ body.gallery-mode .mesh-bg      { display: block; }
           <div class="sparkle">🌸</div>
           <div class="sparkle">💛</div>
           <div class="photo-label">Sanju 🎂</div>
-          <button class="change-photo-btn" id="change-photo-btn" style="display:none;" onclick="tryOpenHeroPhoto()" title="Change photo">📷</button>
+          <button class="change-photo-btn owner-only" id="change-photo-btn" onclick="tryOpenHeroPhoto()" title="Change photo">📷</button>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- UPLOAD -->
-  <section class="upload-section reveal">
+  <!-- UPLOAD (owner only) -->
+  <section class="upload-section reveal owner-only">
     <div class="container">
       <div class="section-head">
         <h2>📸 Upload Your Screenshots</h2>
@@ -1086,10 +1095,13 @@ function checkPin() {
   const val = document.getElementById('pin-input').value;
   if (val === _k) {
     isOwner = true;
+    document.body.classList.add('owner-mode');
     closePinOverlay();
     document.getElementById('owner-mode-bar').classList.add('visible');
     document.getElementById('owner-toggle-btn').textContent = '✅ Owner Mode On';
     document.getElementById('owner-toggle-btn').classList.add('active');
+    // Sync hero placeholders
+    syncHeroPlaceholders();
     renderGallery();
     showToast('🔓 Owner mode unlocked!');
   } else {
@@ -1100,9 +1112,11 @@ function checkPin() {
 }
 function lockOwner() {
   isOwner = false;
+  document.body.classList.remove('owner-mode');
   document.getElementById('owner-mode-bar').classList.remove('visible');
   document.getElementById('owner-toggle-btn').textContent = '🔑 Owner Login';
   document.getElementById('owner-toggle-btn').classList.remove('active');
+  syncHeroPlaceholders();
   renderGallery();
   showToast('🔒 Owner mode locked');
 }
@@ -1155,6 +1169,28 @@ function lockOwner() {
   document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
 })();
 
+/* ── HERO PLACEHOLDER SYNC ── */
+function syncHeroPlaceholders() {
+  const hasPhoto = document.getElementById('hero-img').style.display !== 'none'
+                   && document.getElementById('hero-img').src;
+  const pub = document.getElementById('hero-placeholder-public');
+  if (hasPhoto) {
+    // Photo is set — hide both placeholders
+    if (pub) pub.style.display = 'none';
+    document.getElementById('hero-placeholder').style.display = 'none';
+    // change-photo btn handled by .owner-only CSS + explicit style
+    if (isOwner) {
+      document.getElementById('change-photo-btn').style.removeProperty('display');
+    } else {
+      document.getElementById('change-photo-btn').style.setProperty('display', 'none', 'important');
+    }
+  } else {
+    // No photo — show appropriate placeholder
+    document.getElementById('hero-placeholder').style.display = '';
+    if (pub) pub.style.display = isOwner ? 'none' : '';
+  }
+}
+
 /* ── HERO PHOTO ── */
 function tryOpenHeroPhoto() {
   if (!isOwner) {
@@ -1172,7 +1208,8 @@ function handleHeroPhoto(input) {
     img.src = e.target.result;
     img.style.display = 'block';
     document.getElementById('hero-placeholder').style.display = 'none';
-    document.getElementById('change-photo-btn').style.display = 'flex';
+    document.getElementById('hero-placeholder-public').style.display = 'none';
+    document.getElementById('change-photo-btn').style.removeProperty('display');
     // save in localStorage so it persists on refresh
     try { localStorage.setItem('sanju_hero_photo', e.target.result); } catch(_) {}
   };
@@ -1187,7 +1224,8 @@ function handleHeroPhoto(input) {
       img.src = saved;
       img.style.display = 'block';
       document.getElementById('hero-placeholder').style.display = 'none';
-      document.getElementById('change-photo-btn').style.display = 'flex';
+      document.getElementById('hero-placeholder-public').style.display = 'none';
+      // change-photo btn stays hidden until owner unlocks (CSS owner-only handles it)
     }
   } catch(_) {}
 })();
