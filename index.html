@@ -885,14 +885,15 @@ body.gallery-mode .mesh-bg      { display: block; }
         <div class="hero-photo-wrap">
           <div class="hero-photo-ring">
             <div class="hero-photo-inner" id="hero-photo-inner">
-              <div class="hero-photo-placeholder owner-only" id="hero-placeholder" onclick="tryOpenHeroPhoto()">
-                <span class="ph-icon">📸</span>
-                <span class="ph-txt">Owner: Add Your Photo</span>
-              </div>
-              <!-- Non-owner placeholder (no click, no hint) -->
+              <!-- Public static placeholder (no photo yet, visible to all) -->
               <div class="hero-photo-placeholder" id="hero-placeholder-public" style="cursor:default;">
                 <span class="ph-icon">🎂</span>
                 <span class="ph-txt">Sanju</span>
+              </div>
+              <!-- Owner-only upload hint -->
+              <div class="hero-photo-placeholder owner-only" id="hero-placeholder" onclick="tryOpenHeroPhoto()">
+                <span class="ph-icon">📸</span>
+                <span class="ph-txt">Click to Add Photo</span>
               </div>
               <img id="hero-img" src="" alt="Sanju" style="display:none;">
             </div>
@@ -1171,24 +1172,13 @@ function lockOwner() {
 
 /* ── HERO PLACEHOLDER SYNC ── */
 function syncHeroPlaceholders() {
-  const hasPhoto = document.getElementById('hero-img').style.display !== 'none'
-                   && document.getElementById('hero-img').src;
-  const pub = document.getElementById('hero-placeholder-public');
-  if (hasPhoto) {
-    // Photo is set — hide both placeholders
-    if (pub) pub.style.display = 'none';
-    document.getElementById('hero-placeholder').style.display = 'none';
-    // change-photo btn handled by .owner-only CSS + explicit style
-    if (isOwner) {
-      document.getElementById('change-photo-btn').style.removeProperty('display');
-    } else {
-      document.getElementById('change-photo-btn').style.setProperty('display', 'none', 'important');
-    }
-  } else {
-    // No photo — show appropriate placeholder
-    document.getElementById('hero-placeholder').style.display = '';
-    if (pub) pub.style.display = isOwner ? 'none' : '';
+  // Only relevant when no photo is uploaded yet
+  const hasPhoto = document.getElementById('hero-img').style.display === 'block';
+  if (!hasPhoto) {
+    // Show owner upload hint in owner mode; otherwise show public static placeholder
+    document.getElementById('hero-placeholder-public').style.removeProperty('display');
   }
+  // change-photo btn visibility is handled entirely by .owner-only CSS
 }
 
 /* ── HERO PHOTO ── */
@@ -1199,34 +1189,28 @@ function tryOpenHeroPhoto() {
   }
   document.getElementById('hero-photo-input').click();
 }
+function showHeroPhoto(src) {
+  const img = document.getElementById('hero-img');
+  img.src = src;
+  img.style.display = 'block';
+  // Hide both placeholders — photo is visible to everyone
+  document.getElementById('hero-placeholder').style.setProperty('display','none','important');
+  document.getElementById('hero-placeholder-public').style.setProperty('display','none','important');
+  // change-photo button is owner-only via CSS; no inline style needed
+}
 function handleHeroPhoto(input) {
   if (!isOwner) { showToast('🔒 Owner mode required'); return; }
   if (!input.files[0]) return;
-  const r = new FileReader();
-  r.onload = e => {
-    const img = document.getElementById('hero-img');
-    img.src = e.target.result;
-    img.style.display = 'block';
-    document.getElementById('hero-placeholder').style.display = 'none';
-    document.getElementById('hero-placeholder-public').style.display = 'none';
-    document.getElementById('change-photo-btn').style.removeProperty('display');
-    // save in localStorage so it persists on refresh
-    try { localStorage.setItem('sanju_hero_photo', e.target.result); } catch(_) {}
-  };
-  r.readAsDataURL(input.files[0]);
+  compressImage(input.files[0], dataUrl => {
+    showHeroPhoto(dataUrl);
+    try { localStorage.setItem('sanju_hero_photo', dataUrl); } catch(_) {}
+  });
 }
-// Restore saved hero photo
+// Restore saved hero photo — everyone sees it on load
 (function(){
   try {
     const saved = localStorage.getItem('sanju_hero_photo');
-    if (saved) {
-      const img = document.getElementById('hero-img');
-      img.src = saved;
-      img.style.display = 'block';
-      document.getElementById('hero-placeholder').style.display = 'none';
-      document.getElementById('hero-placeholder-public').style.display = 'none';
-      // change-photo btn stays hidden until owner unlocks (CSS owner-only handles it)
-    }
+    if (saved) showHeroPhoto(saved);
   } catch(_) {}
 })();
 
@@ -1256,38 +1240,55 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s; re
 let wishes = [];
 let friendPhoto = null, gFriendPhoto = null;
 
+/* ── IMAGE COMPRESSION ── */
+// Resizes to max 600px on longest side, JPEG quality 0.45 → ~20–50 KB per photo
+function compressImage(file, callback) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 600;
+      let w = img.width, h = img.height;
+      if (w > MAX || h > MAX) {
+        if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+        else       { w = Math.round(w * MAX / h); h = MAX; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      callback(canvas.toDataURL('image/jpeg', 0.45));
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 /* ── OWNER UPLOAD ── */
 function handleOwnerFiles(files) {
   Array.from(files).forEach(f => {
-    const r = new FileReader();
-    r.onload = e => {
-      wishes.push({ id: uid(), dataUrl: e.target.result, name: 'Birthday Screenshot', msg: '', ts: Date.now(), isOwner: true });
+    compressImage(f, dataUrl => {
+      wishes.push({ id: uid(), dataUrl, name: 'Birthday Screenshot', msg: '', ts: Date.now(), isOwner: true });
       renderGallery();
-    };
-    r.readAsDataURL(f);
+    });
   });
 }
 
 /* ── FRIEND PHOTO ── */
 function handleFriendPhoto(input) {
   if (!input.files[0]) return;
-  const r = new FileReader();
-  r.onload = e => {
-    friendPhoto = e.target.result;
+  compressImage(input.files[0], dataUrl => {
+    friendPhoto = dataUrl;
     document.getElementById('pp-img').src = friendPhoto;
     document.getElementById('pp-preview').style.display = 'block';
-  };
-  r.readAsDataURL(input.files[0]);
+  });
 }
 function handleGFriendPhoto(input) {
   if (!input.files[0]) return;
-  const r = new FileReader();
-  r.onload = e => {
-    gFriendPhoto = e.target.result;
+  compressImage(input.files[0], dataUrl => {
+    gFriendPhoto = dataUrl;
     document.getElementById('g-pp-img').src = gFriendPhoto;
     document.getElementById('g-pp-preview').style.display = 'block';
-  };
-  r.readAsDataURL(input.files[0]);
+  });
 }
 
 /* ── SUBMIT WISH (owner page) ── */
@@ -1408,9 +1409,20 @@ document.addEventListener('keydown', e => {
 /* ── QR ── */
 function generateQR() {
   if (!wishes.length) { showToast('⚠️ Add some wishes first!'); return; }
+
+  // Clear any previously saved bday_ keys to free up space
+  try {
+    Object.keys(localStorage)
+      .filter(k => k.startsWith('bday_'))
+      .forEach(k => localStorage.removeItem(k));
+  } catch(_) {}
+
   const key = 'bday_' + Date.now();
   try { localStorage.setItem(key, JSON.stringify(wishes)); }
-  catch (_) { showToast('⚠️ Too many images — try fewer photos'); return; }
+  catch (_) {
+    showToast('⚠️ Still too large — try removing some photos first');
+    return;
+  }
   const url = window.location.href.split('?')[0] + '?gallery=' + key;
   const pill = document.getElementById('url-pill');
   pill.style.display = 'flex';
